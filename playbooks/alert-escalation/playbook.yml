@@ -1,0 +1,128 @@
+id: playbook-alert-escalation
+name: Alert Escalation
+description: >
+  Routes SIEM correlation-rule alerts to the right responder based on
+  severity and affected-asset criticality, tracks acknowledgment SLAs,
+  and pages up the chain if nobody acks in time. Distinct from Phishing
+  Triage in that the incident originates from detection logic, not a
+  user report — so there's no reporting user to notify, and asset
+  criticality (not indicator reputation) drives the routing decision.
+version: 1
+trigger:
+  type: incident_created
+  source: [siem_correlation_rule]
+  incident_type: SecurityAlert
+
+inputs:
+  - name: AlertSeverity
+    description: Severity as set by the firing correlation rule (informational / low / medium / high / critical)
+  - name: AffectedAsset
+    description: Hostname/IP/user identified in the alert, used to look up asset criticality
+  - name: RelatedIndicators
+    description: Any IPs/domains/hashes attached to the alert, passed to IOC Enrichment if present
+
+tasks:
+  - id: "1"
+    name: Look up asset criticality
+    type: regular
+    description: >
+      Queries the CMDB/asset inventory for the affected asset's
+      criticality tier (e.g. domain controller and finance-DB host are
+      tier 1; a single user workstation is tier 3). Unknown assets
+      default to tier 2, not tier 3 — an untracked asset is itself a
+      minor red flag, not a reason to deprioritize.
+    nexttasks:
+      "#default#": ["2"]
+
+  - id: "2"
+    name: Enrich related indicators
+    type: playbook
+    description: >
+      Calls the IOC Enrichment sub-playbook if the alert has attached
+      indicators (not all correlation-rule alerts do — e.g. a policy
+      violation alert may have none).
+    nexttasks:
+      "#default#": ["3"]
+
+  - id: "3"
+    name: Compute effective priority
+    type: condition
+    description: >
+      Combines alert severity, asset criticality tier, and (if present)
+      indicator reputation score into an effective priority. A "medium"
+      severity alert on a tier-1 asset is escalated as high; a "high"
+      severity alert with a benign-scored indicator on a tier-3 asset
+      may de-escalate to medium pending review, but never below medium
+      — the correlation rule fired for a reason.
+    conditions:
+      - label: critical
+        nexttasks: ["4"]
+      - label: high
+        nexttasks: ["5"]
+      - label: medium_or_below
+        nexttasks: ["6"]
+
+  - id: "4"
+    name: Page on-call tier 1 immediately
+    type: regular
+    description: >
+      Triggers an immediate page (not just a ticket assignment) to the
+      primary on-call responder. Starts a 15-minute acknowledgment timer.
+    nexttasks:
+      "#default#": ["7"]
+
+  - id: "5"
+    name: Assign to SOC queue with 1-hour SLA
+    type: regular
+    description: >
+      Assigns to the active SOC analyst queue, sets a 1-hour
+      acknowledgment SLA timer. No immediate page — queue visibility is
+      enough at this priority.
+    nexttasks:
+      "#default#": ["7"]
+
+  - id: "6"
+    name: Assign to SOC queue with 4-hour SLA
+    type: regular
+    description: >
+      Standard queue assignment with a longer SLA window, reviewed in
+      normal shift handoff rather than actively monitored.
+    nexttasks:
+      "#default#": ["7"]
+
+  - id: "7"
+    name: Monitor for acknowledgment
+    type: condition
+    description: >
+      Waits for the assigned responder to acknowledge within the SLA
+      window set by the priority branch taken above.
+    conditions:
+      - label: acknowledged_in_time
+        nexttasks: ["8"]
+      - label: sla_breached
+        nexttasks: ["9"]
+
+  - id: "8"
+    name: Track to resolution
+    type: regular
+    description: >
+      Incident proceeds under normal analyst ownership; playbook's
+      automation role ends here.
+
+  - id: "9"
+    name: Escalate to next tier
+    type: regular
+    description: >
+      No acknowledgment within SLA — pages the next tier up (team lead /
+      secondary on-call) and flags the original non-ack for follow-up.
+      Restarts the acknowledgment timer at half the original window.
+    nexttasks:
+      "#default#": ["7"]
+
+outputs:
+  - name: EffectivePriority
+    description: Final computed priority after asset-criticality and indicator-reputation adjustment
+  - name: AssignedResponder
+    description: Who the incident ended up with after routing/escalation
+  - name: SLABreaches
+    description: Count of acknowledgment SLA breaches during the incident lifecycle

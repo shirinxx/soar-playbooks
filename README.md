@@ -20,9 +20,15 @@ or internal identifiers.
 soar-playbooks/
 ├── README.md
 └── playbooks/
-    └── phishing-triage/
-        ├── playbook.yml   # task flow, branching logic, inputs/outputs
-        └── README.md      # trigger → logic → output, with rationale
+    ├── phishing-triage/
+    │   ├── playbook.yml   # task flow, branching logic, inputs/outputs
+    │   └── README.md      # trigger → logic → output, with rationale
+    ├── ioc-enrichment/
+    │   ├── playbook.yml   # reusable sub-playbook, called by other playbooks
+    │   └── README.md
+    └── alert-escalation/
+        ├── playbook.yml   # severity/criticality-based routing and paging
+        └── README.md
 ```
 
 Each playbook is represented as a portable flow spec (`playbook.yml`) —
@@ -32,20 +38,21 @@ platform export, since a raw export is mostly platform-specific noise
 public use anyway. The logic maps directly onto Cortex XSOAR-style
 playbook concepts (tasks, `nexttasks`, conditional branches).
 
-## Current playbooks (1)
+## Current playbooks (3)
 
 | Playbook | Trigger | Handles |
 |---|---|---|
 | [Phishing Triage](playbooks/phishing-triage/) | User report / abuse mailbox | Indicator extraction, enrichment, sandbox detonation, verdict scoring, auto-close or analyst escalation |
+| [IOC Enrichment](playbooks/ioc-enrichment/) | Called by other playbooks | Multi-source threat-intel + internal telemetry lookup, aggregated reputation scoring, reusable across playbook types |
+| [Alert Escalation](playbooks/alert-escalation/) | SIEM correlation rule | Asset-criticality-aware priority routing, SLA-timed paging, escalation on non-acknowledgment |
 
 ## Roadmap
 
-- **IOC enrichment** — standalone enrichment sub-playbook (threat intel +
-  internal telemetry lookup) that other playbooks call, instead of each
-  playbook re-implementing enrichment logic
-- **Alert escalation** — severity-based routing/paging playbook for
-  SIEM-generated alerts that don't originate from a user report
 - `tests/` with sample trigger payloads per playbook
+- A containment sub-playbook (block/isolate/quarantine) that Alert
+  Escalation can hand off to once a specific alert type is identified,
+  mirroring how Phishing Triage and Alert Escalation both call IOC
+  Enrichment today
 
 ## About
 
