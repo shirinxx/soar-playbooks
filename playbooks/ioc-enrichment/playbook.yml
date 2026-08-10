@@ -1,0 +1,90 @@
+id: playbook-ioc-enrichment
+name: IOC Enrichment
+description: >
+  Reusable sub-playbook that takes a list of indicators (IPs, domains,
+  URLs, file hashes) and returns an aggregated reputation score plus
+  the raw source data behind it. Called by parent playbooks (e.g.
+  Phishing Triage, Alert Escalation) instead of each implementing its
+  own enrichment logic.
+version: 1
+trigger:
+  type: sub_playbook_call
+  called_by: [phishing-triage, alert-escalation]
+
+inputs:
+  - name: Indicators
+    description: List of indicators to enrich, each tagged with its type (ip / domain / url / file_hash)
+  - name: SkipCache
+    description: "If true, bypasses the internal reputation cache and re-queries all sources. Default: false."
+
+tasks:
+  - id: "1"
+    name: Check internal reputation cache
+    type: condition
+    description: >
+      Looks up each indicator against a local cache of previously-enriched
+      indicators (24h TTL) to avoid re-querying external APIs for
+      indicators seen recently, which matters at volume since threat-intel
+      APIs are rate-limited.
+    conditions:
+      - label: cache_hit
+        nexttasks: ["6"]
+      - label: cache_miss_or_skip
+        nexttasks: ["2"]
+
+  - id: "2"
+    name: Query VirusTotal
+    type: regular
+    description: >
+      Submits file hashes and URLs to VirusTotal; returns detection ratio
+      and vendor category tags (e.g. phishing, malware, malicious).
+    nexttasks:
+      "#default#": ["3"]
+
+  - id: "3"
+    name: Query URLhaus / AbuseIPDB
+    type: regular
+    description: >
+      URLhaus for URL/domain indicators (known malware distribution
+      infrastructure), AbuseIPDB for IP indicators (abuse reports,
+      confidence score). Run in parallel with task 2 in practice, shown
+      sequentially here for clarity.
+    nexttasks:
+      "#default#": ["4"]
+
+  - id: "4"
+    name: Query internal telemetry
+    type: regular
+    description: >
+      Checks whether the indicator has been seen in internal SIEM/EDR
+      telemetry in the last 30 days — internal prevalence changes the
+      read on an indicator (e.g. an IP hitting 200 internal hosts is a
+      different problem than one hitting a single mailbox).
+    nexttasks:
+      "#default#": ["5"]
+
+  - id: "5"
+    name: Aggregate score and write to cache
+    type: regular
+    description: >
+      Combines all source results into a single 0-100 confidence score
+      per indicator using weighted rules (multi-source detection weighted
+      higher than a single low-confidence hit), and writes the result to
+      the reputation cache for future lookups.
+    nexttasks:
+      "#default#": ["6"]
+
+  - id: "6"
+    name: Return enrichment results
+    type: regular
+    description: >
+      Returns the aggregated score and source-level detail to the calling
+      playbook. Cache hits skip straight here with the cached result.
+
+outputs:
+  - name: EnrichedIndicators
+    description: Per-indicator aggregated score (0-100) and category tags
+  - name: SourceDetail
+    description: Raw per-source results (VirusTotal, URLhaus/AbuseIPDB, internal telemetry) for analyst drill-down
+  - name: InternalPrevalence
+    description: Count of internal hosts/mailboxes where each indicator was observed in the last 30 days
