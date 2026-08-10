@@ -1,0 +1,130 @@
+id: playbook-phishing-triage
+name: Phishing Triage
+description: >
+  Automates initial triage of user-reported and abuse-mailbox phishing
+  emails: extracts indicators, enriches them against threat intel, detonates
+  attachments/links in a sandbox, scores a verdict, and either auto-closes
+  or escalates to an analyst with full context attached.
+version: 1
+trigger:
+  type: incident_created
+  source: [user_report_button, abuse_mailbox_ingest]
+  incident_type: Phishing
+
+inputs:
+  - name: EmailIndicators
+    description: URLs, domains, sender address, and attachment hashes extracted from the reported email
+  - name: ReportingUser
+    description: Mailbox/user who reported the email, used for closure notification
+
+tasks:
+  - id: "1"
+    name: Extract indicators from email
+    type: regular
+    description: >
+      Parses the raw email (headers, body, attachments) and extracts
+      sender domain, embedded URLs, and file hashes of any attachments.
+    nexttasks:
+      "#default#": ["2"]
+
+  - id: "2"
+    name: Check indicators against internal blocklist/allowlist
+    type: condition
+    description: >
+      Skips redundant enrichment if the sender domain or URL is already
+      known-bad (fast path to containment) or known-good (fast path to close).
+    conditions:
+      - label: known_bad
+        nexttasks: ["7"]
+      - label: known_good
+        nexttasks: ["9"]
+      - label: unknown
+        nexttasks: ["3"]
+
+  - id: "3"
+    name: Enrich indicators via threat intel
+    type: regular
+    description: >
+      Queries VirusTotal, URLhaus, and AbuseIPDB for each extracted
+      indicator; aggregates reputation scores and detection counts.
+    nexttasks:
+      "#default#": ["4"]
+
+  - id: "4"
+    name: Detonate attachment/URL in sandbox
+    type: regular
+    description: >
+      If the email contains an attachment or a URL not already resolved
+      by threat intel, submits it to a sandbox and waits for a verdict.
+      Skipped automatically if there is nothing to detonate.
+    nexttasks:
+      "#default#": ["5"]
+
+  - id: "5"
+    name: Score verdict
+    type: condition
+    description: >
+      Combines threat-intel reputation and sandbox verdict into a single
+      score: malicious / suspicious / benign. Thresholds are tuned to
+      favor analyst review over auto-close on ambiguous signals.
+    conditions:
+      - label: malicious
+        nexttasks: ["6"]
+      - label: suspicious
+        nexttasks: ["8"]
+      - label: benign
+        nexttasks: ["9"]
+
+  - id: "6"
+    name: Add indicators to blocklist
+    type: regular
+    description: >
+      Pushes confirmed-malicious sender domain, URLs, and file hashes to
+      the email gateway and EDR blocklists so future instances are stopped
+      inline rather than re-triaged.
+    nexttasks:
+      "#default#": ["7"]
+
+  - id: "7"
+    name: Contain and close as malicious
+    type: regular
+    description: >
+      Searches mailboxes org-wide for the same indicators, quarantines
+      any matching emails found, sets incident severity high, and closes
+      with a malicious verdict and full enrichment context attached.
+    nexttasks:
+      "#default#": ["10"]
+
+  - id: "8"
+    name: Escalate to analyst for manual review
+    type: regular
+    description: >
+      Assigns the incident to the on-call SOC analyst with the enrichment
+      summary, sandbox verdict, and confidence score attached. Used when
+      automated scoring can't confidently classify the email.
+    nexttasks:
+      "#default#": ["10"]
+
+  - id: "9"
+    name: Auto-close as benign
+    type: regular
+    description: >
+      Closes the incident with a benign verdict and no containment action.
+    nexttasks:
+      "#default#": ["10"]
+
+  - id: "10"
+    name: Notify reporting user
+    type: regular
+    description: >
+      Sends a templated reply to the reporting user confirming the outcome
+      (blocked / under review / confirmed safe) — closes the feedback loop
+      so users keep reporting.
+
+outputs:
+  - name: Verdict
+    description: malicious | suspicious | benign
+  - name: IndicatorsBlocked
+    description: List of indicators pushed to blocklists, if any
+  - name: IncidentSeverity
+    description: Final severity set on the incident
